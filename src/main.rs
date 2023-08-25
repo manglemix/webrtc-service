@@ -1,25 +1,59 @@
+#![feature(return_position_impl_trait_in_trait)]
+
 use std::{
     collections::hash_map::Entry,
     mem::MaybeUninit,
     sync::atomic::{AtomicU16, Ordering},
 };
 
-use fxhash::FxHashMap;
-use hypermangle_core::auto_main;
 use axum::{
     extract::{ws::Message, WebSocketUpgrade},
     response::Response,
-    routing::get, Router,
+    routing::get,
+    Router,
 };
+use clap::{Parser, Subcommand};
+use fxhash::FxHashMap;
+use hypermangle_core::{
+    auto_main,
+    console::{ExecutableArgs, RemoteClient},
+};
+use log::warn;
 use rand::{thread_rng, Rng};
 use serde_json::{json, to_string, Value};
 use tokio::sync::{mpsc, RwLock};
+
+#[derive(Parser)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    #[command(subcommand)]
+    command: SubCommand,
+}
+
+#[derive(Subcommand)]
+enum SubCommand {
+    Kill,
+}
+
+impl ExecutableArgs for Args {
+    fn execute(self, mut writer: RemoteClient) -> impl std::future::Future<Output=bool> + Send {
+        async move {
+            match self.command {
+                SubCommand::Kill => {
+                    let _ = writer.send("Killing...\n".into()).await;
+                    warn!("Remote close requested");
+                    true
+                }
+            }
+        }
+    }
+}
 
 struct Room {
     new_offers_sender: mpsc::Sender<ConnectingClient>,
     client_ids_counter: AtomicU16,
     ice_to_host: mpsc::Sender<(u16, String)>,
-    finished_clients_sender: mpsc::Sender<u16>
+    finished_clients_sender: mpsc::Sender<u16>,
 }
 
 struct ConnectingClient {
@@ -28,7 +62,6 @@ struct ConnectingClient {
     response_sender: mpsc::Sender<String>,
 }
 
-const MAX_ROOM_CODE: u32 = 1_000_000;
 static mut ROOMS: MaybeUninit<RwLock<FxHashMap<u32, Room>>> = MaybeUninit::uninit();
 
 #[inline]
@@ -64,7 +97,7 @@ async fn host_webrtc(ws: WebSocketUpgrade) -> Response {
             let mut rng = thread_rng();
 
             loop {
-                let code = rng.gen_range(0..MAX_ROOM_CODE);
+                let code: u32 = rng.gen_range(100_000..1_000_000);
                 match rooms.entry(code) {
                     Entry::Occupied(_) => { }
                     Entry::Vacant(entry) => {
@@ -206,13 +239,13 @@ async fn join_webrtc(ws: WebSocketUpgrade) -> Response {
 }
 
 fn main() {
-    unsafe {
-        ROOMS.write(RwLock::default());
-    }
+    auto_main::<Args>(|| {
+        unsafe {
+            ROOMS.write(RwLock::default());
+        }
 
-    auto_main(
         Router::new()
             .route("/host", get(host_webrtc))
             .route("/join", get(join_webrtc))
-    );
+    });
 }
